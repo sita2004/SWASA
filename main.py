@@ -7,50 +7,32 @@ import ast
 import pymongo
 from io import StringIO
 from io import BytesIO
-from datetime import datetime
+from datetime import datetimev
 from werkzeug.security import generate_password_hash, check_password_hash
 from bson.objectid import ObjectId
 import os
 import joblib
 app = Flask(__name__)
-
-# Configuration for Render deployment
-app.secret_key = os.environ.get('SECRET_KEY', 'your-fallback-secret-key-here')
-
-# MongoDB setup with environment variable
-MONGO_URI = os.environ.get('MONGO_URI', "mongodb+srv://sitanagapavani65:puppy1334@cluster0.buv6uml.mongodb.net/")
-
-try:
-    client = pymongo.MongoClient(MONGO_URI)
-    # Test the connection
-    client.admin.command('ping')
-    db = client["medicine_recommendation"]
-    users_collection = db["users"]
-    feedback_collection = db["feedback"]
-    activity_collection = db["user_activity"]
-    print(" MongoDB connected successfully!")
-except Exception as e:
-    print(f" MongoDB connection error: {e}")
+#app.secret_key = os.urandom(24).hex()
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex()) # Fallback for local
+# MongoDB setup
+client = pymongo.MongoClient(os.environ.get("MONGO_URI","mongodb+srv://sitanagapavani65:puppy1334@cluster0.buv6uml.mongodb.net/")
+#client = pymongo.MongoClient("mongodb+srv://sitanagapavani65:puppy1334@cluster0.buv6uml.mongodb.net/")
+db = client["medicine_recommendation"]
+users_collection = db["users"]
+feedback_collection = db["feedback"]
+activity_collection = db["user_activity"]
 
 # Loading the datasets
-try:
-    print(" Loading datasets...")
-    sym_des = pd.read_csv("kaggle_dataset/symptoms_df.csv")
-    precautions = pd.read_csv("kaggle_dataset/precautions_df.csv")
-    workout = pd.read_csv("kaggle_dataset/workout_df.csv")
-    description = pd.read_csv("kaggle_dataset/description.csv")
-    medications = pd.read_csv('kaggle_dataset/medications.csv')
-    diets = pd.read_csv("kaggle_dataset/diets.csv")
-    print("All datasets loaded successfully!")
-    
-    # Load the trained model
-    print(" Loading machine learning model...")
-    Rf = joblib.load(open('model/RandomForest.pkl', 'rb'))
-    print("Model loaded successfully!")
-    
-except Exception as e:
-    print(f"Error loading datasets or model: {e}")
-    raise e
+sym_des = pd.read_csv("kaggle_dataset/symptoms_df.csv")
+precautions = pd.read_csv("kaggle_dataset/precautions_df.csv")
+workout = pd.read_csv("kaggle_dataset/workout_df.csv")
+description = pd.read_csv("kaggle_dataset/description.csv")
+medications = pd.read_csv('kaggle_dataset/medications.csv')
+diets = pd.read_csv("kaggle_dataset/diets.csv")
+
+# Load the trained model
+Rf = joblib.load(open('model/RandomForest.pkl', 'rb'))
 
 # Symptoms and diseases dictionaries
 symptoms_list = {'itching': 0, 'skin_rash': 1, 'nodal_skin_eruptions': 2, 'continuous_sneezing': 3, 'shivering': 4,
@@ -145,11 +127,12 @@ def login():
         email = request.form['email']
         password = request.form['password']
         
+        # Find user by email
         user = users_collection.find_one({'email': email})
         
-        if user and user['password'] == password:
+        if user and user['password'] == password:  # In production, use password hashing
             session['email'] = email
-            session['username'] = user['username']
+            session['username'] = user['username']  # Store both email and username
             return redirect(url_for('predict'))
         else:
             return render_template('login.html', message='Invalid username or password')
@@ -163,15 +146,17 @@ def signup():
         email = request.form["email"]
         password = request.form["password"]
 
+        # Check if username or email already exists
         existing_user = users_collection.find_one({"$or": [{"username": username}, {"email": email}]})
 
         if existing_user:
             return render_template("signup.html", message="Username or Email already exists!")
 
+        # Insert new user into MongoDB
         users_collection.insert_one({
             "username": username,
             "email": email,
-            "password": password,
+            "password": password,  # In production, hash this password
             "created_at": datetime.now()
         })
 
@@ -186,6 +171,7 @@ def logout():
 
 @app.route('/predict', methods=['GET', 'POST'])
 def predict():
+    # Check if user is logged in
     if 'username' not in session:
         return redirect(url_for('login'))
 
@@ -202,12 +188,14 @@ def predict():
             predicted_disease = predicted_value(selected_symptoms)
             dis_des, precautions, medications, rec_diet, workout = information(predicted_disease)
             
+            # Process precautions
             my_precautions = []
             if precautions and len(precautions) > 0:
                 for i in precautions[0]:
-                    if i:
+                    if i:  # Check if precaution is not None or empty
                         my_precautions.append(i)
             
+            # Process medications
             medications_list = []
             if medications and len(medications) > 0:
                 try:
@@ -215,8 +203,10 @@ def predict():
                     for item in medication_list:
                         medications_list.append(item)
                 except (ValueError, SyntaxError):
+                    # If ast.literal_eval fails, treat it as a simple string
                     medications_list = [medications[0]]
             
+            # Process diet
             rec_diet_list = []
             if rec_diet and len(rec_diet) > 0:
                 try:
@@ -224,8 +214,10 @@ def predict():
                     for item in diet_list:
                         rec_diet_list.append(item)
                 except (ValueError, SyntaxError):
+                    # If ast.literal_eval fails, treat it as a simple string
                     rec_diet_list = [rec_diet[0]]
 
+            # Store user activity
             activity_collection.insert_one({
                 'username': session['username'],
                 'email': session['email'],
@@ -249,39 +241,6 @@ def predict():
             return render_template('index.html', message=message, all_symptoms=all_symptoms)
     
     return render_template('index.html', all_symptoms=all_symptoms)
-
-@app.route('/download', methods=['POST'])
-def download():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-    
-    predicted_disease = request.form['predicted_disease']
-    dis_des = request.form['dis_des']
-    my_precautions = request.form.getlist('my_precautions')
-    medications = request.form.getlist('medications')
-    my_diet = request.form.getlist('my_diet')
-    workout = request.form.getlist('workout')
-
-  
-
-    output = BytesIO()
-    output.write(f"Predicted Disease: {predicted_disease}\n\n".encode('utf-8'))
-    output.write(f"Description: {dis_des}\n\n".encode('utf-8'))
-    output.write("Precautions:\n".encode('utf-8'))
-    for precaution in my_precautions:
-        output.write(f"- {precaution}\n".encode('utf-8'))
-    output.write("\nMedications:\n".encode('utf-8'))
-    for medication in medications:
-        output.write(f"- {medication}\n".encode('utf-8'))
-    output.write("\nDiet:\n".encode('utf-8'))
-    for diet in my_diet:
-        output.write(f"- {diet}\n".encode('utf-8'))
-    output.write("\nWorkout:\n".encode('utf-8'))
-    for work in workout:
-        output.write(f"- {work}\n".encode('utf-8'))
-
-    output.seek(0)
-    return send_file(output, as_attachment=True, download_name='result.txt', mimetype='text/plain')
 
 @app.route('/history')
 def history():
@@ -331,12 +290,41 @@ def feedback():
         return render_template('feedback.html', message="Thank you for your feedback!")
     
     return render_template('feedback.html')
+@app.route('/download', methods=['POST'])
+def download():
+    predicted_disease = request.form['predicted_disease']
+    dis_des = request.form['dis_des']
+    my_precautions = request.form.getlist('my_precautions')
+    medications = request.form.getlist('medications')
+    my_diet = request.form.getlist('my_diet')
+    workout = request.form.getlist('workout')
 
-# Health check endpoint
-@app.route('/health')
-def health_check():
-    return {'status': 'healthy', 'message': 'Disease Prediction System is running!'}, 200
+    # # Store download activity
+    # activity_collection.insert_one({
+    #     'username': session['username'],
+    #     'timestamp': datetime.now(tz=None),
+    #     'activity_type': 'download_results',
+    #     'predicted_disease': predicted_disease
+    # })
+
+    output = BytesIO()
+    output.write(f"Predicted Disease: {predicted_disease}\n\n".encode('utf-8'))
+    output.write(f"Description: {dis_des}\n\n".encode('utf-8'))
+    output.write("Precautions:\n".encode('utf-8'))
+    for precaution in my_precautions:
+        output.write(f"- {precaution}\n".encode('utf-8'))
+    output.write("\nMedications:\n".encode('utf-8'))
+    for medication in medications:
+        output.write(f"- {medication}\n".encode('utf-8'))
+    output.write("\nDiet:\n".encode('utf-8'))
+    for diet in my_diet:
+        output.write(f"- {diet}\n".encode('utf-8'))
+    output.write("\nWorkout:\n".encode('utf-8'))
+    for work in workout:
+        output.write(f"- {work}\n".encode('utf-8'))
+
+    output.seek(0)
+    return send_file(output, as_attachment=True, download_name='result.txt', mimetype='text/plain')
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    app.run(debug=True, host='0.0.0.0', port=5000)
